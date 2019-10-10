@@ -4,17 +4,118 @@
 #include <editline/readline.h>
 #include "mpc.h"
 
-long eval_op(long x, char* op, long y) {
-    if (strcmp(op, "+") == 0) { return x + y; }
-    if (strcmp(op, "-") == 0) { return x - y; }
-    if (strcmp(op, "*") == 0) { return x * y; }
-    if (strcmp(op, "/") == 0) { return x / y; }
-    if (strcmp(op, "%") == 0) { return x % y; }
-    if (strcmp(op, "min") == 0) { return fmin(x, y); }
-    if (strcmp(op, "max") == 0) { return fmax(x, y); }
+/* lval types */
+enum { LVAL_LINT, LVAL_DEC, LVAL_ERR };
 
+/* Error types */
+enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM, LERR_TYPE_MISMATCH };
 
-    return 0;
+/* lilsp value struct */
+typedef struct {
+    int type;
+    long lint;
+    double dec;
+    int err;
+} lval;
+
+/* Create new integer type */
+lval lval_lint(long x) {
+    lval v;
+    v.type = LVAL_LINT;
+    v.lint = x;
+    return v;
+}
+
+/* Create new decimal type */
+lval lval_dec(double x) {
+    lval v;
+    v.type = LVAL_DEC;
+    v.dec = x;
+    return v;
+}
+
+/* create error type */
+lval lval_err(int x) {
+    lval v;
+    v.type = LVAL_ERR;
+    v.err = x;
+    return v;
+}
+
+/* print an lval type */
+void lval_print(lval v) {
+    switch(v.type) {
+        case LVAL_LINT:
+            printf("%li", v.lint);
+            break;
+        case LVAL_DEC:
+            printf("%f", v.dec);
+            break;
+        case LVAL_ERR:
+            // Check error type and print
+            if (v.err == LERR_DIV_ZERO) {
+                printf("Error: Division by zero");
+            }
+            if (v.err == LERR_BAD_OP) {
+                printf("Error: Invalid operator");
+            }
+            if (v.err == LERR_BAD_NUM) {
+                printf("Error: Invalid number");
+            }
+            if (v.err == LERR_TYPE_MISMATCH) {
+                printf("Error: Mismatched types");
+            }
+            break;
+    }
+}
+
+void lval_println(lval v) {
+    lval_print(v);
+    putchar('\n');
+}
+
+lval eval_op(lval x, char* op, lval y) {
+    // If either value is an error, return it
+    if (x.type == LVAL_ERR) { return x; }
+    if (y.type == LVAL_ERR) { return y; }
+
+    // Different return types based on whether the operands are integers or floats
+    //TODO: make this work with mixed types
+    if (x.type == LVAL_LINT && y.type == LVAL_LINT) {
+        if (strcmp(op, "+") == 0) { return lval_lint(x.lint + y.lint); }
+        if (strcmp(op, "-") == 0) { return lval_lint(x.lint - y.lint); }
+        if (strcmp(op, "*") == 0) { return lval_lint(x.lint * y.lint); }
+        if (strcmp(op, "/") == 0) {
+            return y.lint == 0 ? lval_err(LERR_DIV_ZERO) : lval_lint(x.lint / y.lint);
+        }
+        if (strcmp(op, "%") == 0) {
+            return y.lint == 0 ? lval_err(LERR_DIV_ZERO) : lval_lint(x.lint % y.lint);
+        }
+        if (strcmp(op, "min") == 0) { return lval_lint(fmin(x.lint, y.lint)); }
+        if (strcmp(op, "max") == 0) { return lval_lint(fmax(x.lint, y.lint)); }
+
+        // Correct types but reached end without finding a matching operator
+        return lval_err(LERR_BAD_OP);
+    }
+
+    if (x.type == LVAL_DEC && y.type == LVAL_DEC) {
+        if (strcmp(op, "+") == 0) { return lval_dec(x.dec + y.dec); }
+        if (strcmp(op, "-") == 0) { return lval_dec(x.dec - y.dec); }
+        if (strcmp(op, "*") == 0) { return lval_dec(x.dec * y.dec); }
+        if (strcmp(op, "/") == 0) {
+            return y.dec == 0 ? lval_err(LERR_DIV_ZERO) : lval_dec(x.dec / y.dec);
+        }
+        if (strcmp(op, "%") == 0) {
+            return y.dec == 0 ? lval_err(LERR_DIV_ZERO) : lval_dec(fmod(x.dec, y.dec));
+        }
+        if (strcmp(op, "min") == 0) { return lval_dec(fmin(x.dec, y.dec)); }
+        if (strcmp(op, "max") == 0) { return lval_dec(fmax(x.dec, y.dec)); }
+
+        return lval_err(LERR_BAD_OP);
+    }
+
+    // The types of the operands didn't match
+    return lval_err(LERR_TYPE_MISMATCH);
 }
 
 int number_of_nodes(mpc_ast_t* t) {
@@ -31,16 +132,30 @@ int number_of_nodes(mpc_ast_t* t) {
     return 0;
 }
 
-long eval(mpc_ast_t* t) {
+lval eval(mpc_ast_t* t) {
     // Return numbers immediately
     if (strstr(t->tag, "number")) {
-        return atoi(t->contents);
+        // Int type
+        if (strstr(t->tag, "integer")) {
+            // Check for conversion errors
+            errno = 0;
+            long x = strtol(t->contents, NULL, 10);
+            return errno != ERANGE ? lval_lint(x) : lval_err(LERR_BAD_NUM);
+        }
+        // Decimal type
+        if (strstr(t->tag, "decimal")) {
+            // Check for conversion errors
+            errno = 0;
+            float x = strtof(t->contents, NULL);
+            return errno != ERANGE ? lval_dec(x) : lval_err(LERR_BAD_NUM);
+        }
+
     }
     // Operator is second child (first is '(')
     char* op = t->children[1]->contents;
 
     // Store third child in x
-    long x = eval(t->children[2]);
+    lval x = eval(t->children[2]);
 
     // Iterate over remaining children and evaluate each operation
     int i = 3;
@@ -54,6 +169,8 @@ long eval(mpc_ast_t* t) {
 
 int main(int argc, char** argv) {
     /* Define RPN grammar */
+    mpc_parser_t* Integer = mpc_new("integer");
+    mpc_parser_t* Decimal = mpc_new("decimal");
     mpc_parser_t* Number = mpc_new("number");
     mpc_parser_t* Operator = mpc_new("operator");
     mpc_parser_t* Expr = mpc_new("expr");
@@ -62,12 +179,14 @@ int main(int argc, char** argv) {
     /* Define with following language */
     mpca_lang(MPCA_LANG_DEFAULT,
         "                                                                                   \
-            number      : /-?[0-9]+/ ;                                                      \
-            operator    : '+' | '-' | '*' | '/' | '%' | \"min\" | \"max\" ;                     \
+            integer     : /-?[0-9]+/ ;                                                      \
+            decimal     : /-?[0-9]+\\.[0-9]+/ ;                                             \
+            number      : <decimal> | <integer> ;                                           \
+            operator    : '+' | '-' | '*' | '/' | '%' | \"min\" | \"max\" ;                 \
             expr        : <number> | '(' <operator> <expr>+ ')' ;                           \
-            lilsp        : /^/ <operator> <expr>+ /$/ ;                                     \
+            lilsp       : /^/ <operator> <expr>+ /$/ ;                                      \
         ",
-        Number, Operator, Expr, Lilsp);
+        Integer, Decimal, Number, Operator, Expr, Lilsp);
 
     puts("Lilsp Version 0.0.0.1");
     puts("Press Ctrl+C to exit\n");
@@ -85,8 +204,8 @@ int main(int argc, char** argv) {
         // return 1 on success, 0 on failure
         if (mpc_parse("<stdin>", input, Lilsp, &r)) {
             // Print result of evaluation
-            long result = eval(r.output);
-            printf("%li\n", result);
+            lval result = eval(r.output);
+            lval_println(result);
 
             // Clean up ast from memory
             mpc_ast_delete(r.output);
