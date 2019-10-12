@@ -5,76 +5,177 @@
 #include "mpc.h"
 
 /* lval types */
-enum { LVAL_LINT, LVAL_DEC, LVAL_ERR };
-
-/* Error types */
-enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM, LERR_TYPE_MISMATCH };
+enum { LVAL_LINT, LVAL_DEC, LVAL_ERR, LVAL_SYM, LVAL_SEXPR };
 
 /* lilsp value struct */
-typedef struct {
+typedef struct lval {
     int type;
     long lint;
     double dec;
-    int err;
+    char* err;
+    char* sym;
+    /* Count and pointer to list of lvals */
+    int count;
+    struct lval** cell;
 } lval;
 
-/* Create new integer type */
-lval lval_lint(long x) {
-    lval v;
-    v.type = LVAL_LINT;
-    v.lint = x;
+/* Create new pointer to integer type */
+lval* lval_lint(long x) {
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_LINT;
+    v->lint = x;
     return v;
 }
 
-/* Create new decimal type */
-lval lval_dec(double x) {
-    lval v;
-    v.type = LVAL_DEC;
-    v.dec = x;
+/* Create new pointer to decimal type */
+lval* lval_dec(double x) {
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_DEC;
+    v->dec = x;
     return v;
 }
 
-/* create error type */
-lval lval_err(int x) {
-    lval v;
-    v.type = LVAL_ERR;
-    v.err = x;
+/* Create pointer to error type */
+lval* lval_err(char* m) {
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_ERR;
+    v->err = malloc(strlen(m) + 1);
+    strcpy(v->err, m);
     return v;
+}
+
+/* Create pointer to symbol type */
+lval* lval_sym(char* s) {
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_SYM;
+    v->sym = malloc(strlen(s) + 1);
+    strcpy(v->sym, s);
+    return v;
+}
+
+/* Create pointer to new sexpr type */
+lval* lval_sexpr(void) {
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_SEXPR;
+    v->count = 0;
+    v->cell = NULL;
+    return v;
+}
+
+// Reallocate memory and add item to list of children
+lval* lval_add(lval* v, lval* x) {
+    v->count++;
+    v->cell = realloc(v->cell, sizeof(lval*) * v->count);
+    v->cell[v->count-1] = x;
+    return v;
+}
+
+/* Delete an lval and free it's children's memory (if applicable) */
+void lval_del(lval* v) {
+    switch (v->type) {
+        // nothing special for numbers
+        case LVAL_LINT:
+        case LVAL_DEC: break;
+
+        // For err and symbol, release string data
+        case LVAL_ERR: free(v->err); break;
+        case LVAL_SYM: free(v->sym); break;
+
+        // Delete all elements within sexpr
+        case LVAL_SEXPR:
+        for (int i = 0; i < v->count; i++) {
+            lval_del(v->cell[i]);
+        }
+        // Free memory allocated to hold pointers
+        free(v->cell);
+        break;
+    }
+    free(v);
+}
+
+// Forward declare
+void lval_print(lval* v);
+
+void lval_expr_print(lval* v, char open, char close) {
+    putchar(open);
+    for (int i = 0; i < v->count; i++) {
+        // print value
+        lval_print(v->cell[i]);
+
+        // If last element don't print trailing space
+        if (i != (v->count-1)) {
+            putchar(' ');
+        }
+    }
+    putchar(close);
 }
 
 /* print an lval type */
-void lval_print(lval v) {
-    switch(v.type) {
+void lval_print(lval* v) {
+    switch(v->type) {
         case LVAL_LINT:
-            printf("%li", v.lint);
+            printf("%li", v->lint);
             break;
         case LVAL_DEC:
-            printf("%f", v.dec);
+            printf("%f", v->dec);
             break;
         case LVAL_ERR:
-            // Check error type and print
-            if (v.err == LERR_DIV_ZERO) {
-                printf("Error: Division by zero");
-            }
-            if (v.err == LERR_BAD_OP) {
-                printf("Error: Invalid operator");
-            }
-            if (v.err == LERR_BAD_NUM) {
-                printf("Error: Invalid number");
-            }
-            if (v.err == LERR_TYPE_MISMATCH) {
-                printf("Error: Mismatched types");
-            }
+            printf("Error: %s", v->err);
+            break;
+        case LVAL_SYM:
+            printf("%s", v->sym);
+            break;
+        case LVAL_SEXPR:
+            lval_expr_print(v, '(', ')');
             break;
     }
 }
 
-void lval_println(lval v) {
+void lval_println(lval *v) {
     lval_print(v);
     putchar('\n');
 }
 
-lval eval_op(lval x, char* op, lval y) {
+lval* lval_read_num(mpc_ast_t* t) {
+    errno = 0;
+    if (strstr(t->tag, "integer")) {
+        // Check for conversion errors
+        errno = 0;
+        long x = strtol(t->contents, NULL, 10);
+        return errno != ERANGE ? lval_lint(x) : lval_err("Invalid number");
+    }
+    // Decimal type
+    if (strstr(t->tag, "decimal")) {
+        // Check for conversion errors
+        errno = 0;
+        float x = strtof(t->contents, NULL);
+        return errno != ERANGE ? lval_dec(x) : lval_err("Invalid number");
+    }
+
+    return lval_err("Invalid number");
+}
+
+lval* lval_read(mpc_ast_t* t) {
+    // Return symbol or number
+    if (strstr(t->tag, "number")) { return lval_read_num(t); }
+    if (strstr(t->tag, "symbol")) { return lval_sym(t->contents); }
+
+    // If root or sexpr, create an empty list
+    lval* x = NULL;
+    if (strcmp(t->tag, ">") == 0) { x = lval_sexpr(); }
+    if (strstr(t->tag, "sexpr")) { x = lval_sexpr(); }
+
+    // Fill list with valid expressions
+    for (int i = 0; i < t->children_num; i++) {
+        if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
+        if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
+        if (strcmp(t->children[i]->tag, "regex") == 0) { continue; }
+        x = lval_add(x, lval_read(t->children[i]));        
+    }
+    return x;
+}
+
+/*lval eval_op(lval x, char* op, lval y) {
     // If either value is an error, return it
     if (x.type == LVAL_ERR) { return x; }
     if (y.type == LVAL_ERR) { return y; }
@@ -165,14 +266,15 @@ lval eval(mpc_ast_t* t) {
     }
 
     return x;
-}
+}*/
 
 int main(int argc, char** argv) {
     /* Define RPN grammar */
     mpc_parser_t* Integer = mpc_new("integer");
     mpc_parser_t* Decimal = mpc_new("decimal");
     mpc_parser_t* Number = mpc_new("number");
-    mpc_parser_t* Operator = mpc_new("operator");
+    mpc_parser_t* Symbol = mpc_new("symbol");
+    mpc_parser_t* Sexpr = mpc_new("sexpr");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Lilsp = mpc_new("lilsp");
 
@@ -182,11 +284,12 @@ int main(int argc, char** argv) {
             integer     : /-?[0-9]+/ ;                                                      \
             decimal     : /-?[0-9]+\\.[0-9]+/ ;                                             \
             number      : <decimal> | <integer> ;                                           \
-            operator    : '+' | '-' | '*' | '/' | '%' | \"min\" | \"max\" ;                 \
-            expr        : <number> | '(' <operator> <expr>+ ')' ;                           \
-            lilsp       : /^/ <operator> <expr>+ /$/ ;                                      \
+            symbol      : '+' | '-' | '*' | '/' | '%' | \"min\" | \"max\" ;                 \
+            sexpr       : '(' <expr>* ')' ;                                                 \
+            expr        : <number> | <symbol> | <sexpr> ;                                   \
+            lilsp       : /^/ <expr>* /$/ ;                                                 \
         ",
-        Integer, Decimal, Number, Operator, Expr, Lilsp);
+        Integer, Decimal, Number, Symbol, Sexpr, Expr, Lilsp);
 
     puts("Lilsp Version 0.0.0.1");
     puts("Press Ctrl+C to exit\n");
@@ -204,8 +307,9 @@ int main(int argc, char** argv) {
         // return 1 on success, 0 on failure
         if (mpc_parse("<stdin>", input, Lilsp, &r)) {
             // Print result of evaluation
-            lval result = eval(r.output);
-            lval_println(result);
+            lval* x = lval_read(r.output);
+            lval_println(x);
+            lval_del(x);
 
             // Clean up ast from memory
             mpc_ast_delete(r.output);
@@ -218,6 +322,6 @@ int main(int argc, char** argv) {
     }
 
     // Clean up parsers
-    mpc_cleanup(4, Number, Operator, Expr, Lilsp);
+    mpc_cleanup(7, Integer, Decimal, Number, Symbol, Sexpr, Expr, Lilsp);
     return 0;
 }
